@@ -22,6 +22,7 @@ typedef struct sPin
 } tPin;
 
 tpin P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7;
+unsigned char display_config = 0x00;
 
 /* Converts a pin number got from the Lua stack to the tPin format */
 static tPin convertPin( int p )
@@ -62,6 +63,53 @@ static int getPinVal( tPin p )
 {
   return platform_pio_op( p.port, p.pin, PLATFORM_IO_PIN_GET );
 }
+
+static void send_nibble( unsigned char data )
+{
+  unsigned char out = 0x0f & data
+  setPinVal( P_D0, out & 0x01 );
+  setPinVal( P_D1, out & 0x02 );
+  setPinVal( P_D2, out & 0x04 );
+  setPinVal( P_D3, out & 0x08 );
+  setPinVal( P_D4, out & 0x10 );
+  setPinVal( P_D5, out & 0x20 );
+  setPinVal( P_D6, out & 0x40 );
+  setPinVal( P_D7, out & 0x80 );
+
+  platform_timer_delay( 1, 1000 ); /* 1 milisecond */
+  setPinVal( P_EN, 1 );
+  platform_timer_delay( 1, 1000 ); /* 1 milisecond */
+  setPinVal( P_EN, 0 );
+  platform_timer_delay( 1, 1000 ); /* 1 milisecond */
+}
+
+static void send_byte( unsigned char data, char isCommand )
+{
+  setPinVal( P_RS, !(isCommand & 0x01) );
+  send_nibble( data >> 4 );
+  send_nibble( data );
+}
+
+void display_control_set_on( unsigned char flags )
+{
+    display_config |= flags;
+    send_byte( DISPLAY_CONTROL | display_config, 1 );
+}
+
+void display_control_set_off( unsigned char flags )
+{
+    display_config &= ~flags;
+    send_byte( DISPLAY_CONTROL | display_config, 1 );
+}
+
+void lcd_write( char * str )
+{
+    int i;
+
+    for (i = 0; str[i]!= '\0'; i++)
+        send_byte(str[i], 0);
+}
+
 
 /* Pins: P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7; */
 static int hd44780_init( lua_State *L )
