@@ -16,6 +16,30 @@
 #define IGNORE 1
 #define USE 0
 
+// Commands
+#define CLEAR_DISPLAY   0x01
+#define RETURN_HOME     0x02
+#define DISPLAY_CONTROL 0x08
+#define FUNCTION_SET    0x20
+#define SET_CGRAM_ADDR  0x40
+#define SET_DDRAM_ADDR  0x80
+
+// Flags
+#define DISPLAY_ON  0x04
+#define CURSOR_ON   0x02
+#define BLINKING_ON 0x01
+
+// Functions
+#define lcd_clear()         send_byte( CLEAR_DISPLAY, 1 )
+#define lcd_return_home()   send_byte( RETURN_HOME, 1 )
+ 
+#define lcd_display_on()    display_control_set_on( DISPLAY_ON )
+#define lcd_display_off()   display_control_set_off( DISPLAY_ON )
+#define lcd_cursor_on()     display_control_set_on( CURSOR_ON )
+#define lcd_cursor_off()    display_control_set_off( CURSOR_ON )
+#define lcd_blinking_on()   display_control_set_on( BLINKING_ON )
+#define lcd_blinking_off()  display_control_set_off( BLINKING_ON )
+
 typedef struct sPin
 {
   pio_type pin, port;
@@ -67,7 +91,7 @@ static int getPinVal( tPin p )
 static void send_nibble( unsigned char data )
 {
   unsigned char out = 0x0f & data
-  setPinVal( P_D0, out & 0x01 );
+    setPinVal( P_D0, out & 0x01 );
   setPinVal( P_D1, out & 0x02 );
   setPinVal( P_D2, out & 0x04 );
   setPinVal( P_D3, out & 0x08 );
@@ -92,25 +116,60 @@ static void send_byte( unsigned char data, char isCommand )
 
 void display_control_set_on( unsigned char flags )
 {
-    display_config |= flags;
-    send_byte( DISPLAY_CONTROL | display_config, 1 );
+  display_config |= flags;
+  send_byte( DISPLAY_CONTROL | display_config, 1 );
 }
 
 void display_control_set_off( unsigned char flags )
 {
-    display_config &= ~flags;
-    send_byte( DISPLAY_CONTROL | display_config, 1 );
+  display_config &= ~flags;
+  send_byte( DISPLAY_CONTROL | display_config, 1 );
 }
 
 void lcd_write( char * str )
 {
-    int i;
+  int i;
 
     for (i = 0; str[i]!= '\0'; i++)
         send_byte(str[i], 0);
 }
 
+void lcd_goto(unsigned char row, unsigned char col)
+{
+    unsigned char addr = ((row - 1) * 0x40) + col - 1;
+    send_byte( SET_DDRAM_ADDR | addr, 1 );
+}
 
+void lcd_add_character(unsigned char addr, unsigned char * pattern)
+{
+    int i;
+
+    send_byte( SET_CGRAM_ADDR | addr << 3, 1 );
+    for (i = 0; i < 8; i++)
+      send_byte( pattern[i], 0 );
+}
+
+void lcd_initialize(void)
+{
+    setPinVal( P_RS, 0 );
+    setPinVal( P_RW, 0 );
+
+    // set 4-bit mode
+    send_nibble( 0x02 );
+
+    // function set
+    send_byte( FUNCTION_SET | DL | N | F, 1 );
+
+    lcd_display_on();
+    lcd_cursor_off();
+    lcd_blinking_off();
+
+    // cursor direction and display shift
+    //send_byte(0b00000110);
+
+    lcd_clear();
+    lcd_return_home();
+}
 /* Pins: P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7; */
 static int hd44780_init( lua_State *L )
 {
