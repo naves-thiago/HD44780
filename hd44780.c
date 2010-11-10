@@ -28,6 +28,12 @@
 #define DISPLAY_ON  0x04
 #define CURSOR_ON   0x02
 #define BLINKING_ON 0x01
+// 4-bit mode
+#define DL (0 << 4)
+// 2-line display
+#define N  (1 << 3)
+// 5x8 character font
+#define F  (0 << 2)
 
 // Functions
 #define lcd_clear()         send_byte( CLEAR_DISPLAY, 1 )
@@ -45,8 +51,8 @@ typedef struct sPin
   pio_type pin, port;
 } tPin;
 
-tpin P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7;
-unsigned char display_config = 0x00;
+unsigned char display_config;
+tPin P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7;
 
 /* Converts a pin number got from the Lua stack to the tPin format */
 static tPin convertPin( int p )
@@ -90,8 +96,8 @@ static int getPinVal( tPin p )
 
 static void send_nibble( unsigned char data )
 {
-  unsigned char out = 0x0f & data
-    setPinVal( P_D0, out & 0x01 );
+  unsigned char out = 0x0f & data;
+  setPinVal( P_D0, out & 0x01 );
   setPinVal( P_D1, out & 0x02 );
   setPinVal( P_D2, out & 0x04 );
   setPinVal( P_D3, out & 0x08 );
@@ -114,33 +120,33 @@ static void send_byte( unsigned char data, char isCommand )
   send_nibble( data );
 }
 
-void display_control_set_on( unsigned char flags )
+static void display_control_set_on( unsigned char flags )
 {
   display_config |= flags;
   send_byte( DISPLAY_CONTROL | display_config, 1 );
 }
 
-void display_control_set_off( unsigned char flags )
+static void display_control_set_off( unsigned char flags )
 {
   display_config &= ~flags;
   send_byte( DISPLAY_CONTROL | display_config, 1 );
 }
 
-void lcd_write( char * str )
+static void lcd_write( char * str )
 {
   int i;
 
-    for (i = 0; str[i]!= '\0'; i++)
-        send_byte(str[i], 0);
+  for (i = 0; str[i]!= '\0'; i++)
+    send_byte(str[i], 0);
 }
 
-void lcd_goto(unsigned char row, unsigned char col)
+static void lcd_goto(unsigned char row, unsigned char col)
 {
     unsigned char addr = ((row - 1) * 0x40) + col - 1;
     send_byte( SET_DDRAM_ADDR | addr, 1 );
 }
 
-void lcd_add_character(unsigned char addr, unsigned char * pattern)
+static void lcd_add_character(unsigned char addr, unsigned char * pattern)
 {
     int i;
 
@@ -149,7 +155,7 @@ void lcd_add_character(unsigned char addr, unsigned char * pattern)
       send_byte( pattern[i], 0 );
 }
 
-void lcd_initialize(void)
+static void lcd_initialize(void)
 {
     setPinVal( P_RS, 0 );
     setPinVal( P_RW, 0 );
@@ -164,12 +170,10 @@ void lcd_initialize(void)
     lcd_cursor_off();
     lcd_blinking_off();
 
-    // cursor direction and display shift
-    //send_byte(0b00000110);
-
     lcd_clear();
     lcd_return_home();
 }
+
 /* Pins: P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7; */
 static int hd44780_init( lua_State *L )
 {
@@ -185,16 +189,48 @@ static int hd44780_init( lua_State *L )
   P_D6 = convertPin( luaL_checkinteger( L, 10 ) );
   P_D7 = convertPin( luaL_checkinteger( L, 11 ) );
 
+  setPinDir( P_RS, DIR_OUT ); 
+  setPinDir( P_RW, DIR_OUT ); 
+  setPinDir( P_EN, DIR_OUT ); 
+  setPinDir( P_D0, DIR_OUT ); 
+  setPinDir( P_D1, DIR_OUT ); 
+  setPinDir( P_D2, DIR_OUT ); 
+  setPinDir( P_D3, DIR_OUT ); 
+  setPinDir( P_D4, DIR_OUT ); 
+  setPinDir( P_D5, DIR_OUT ); 
+  setPinDir( P_D6, DIR_OUT ); 
+  setPinDir( P_D7, DIR_OUT ); 
+
+  lcd_initialize();
+
   return 0;
 }
 
-const LUA_REG_TYPE keyboard_map[] = {
+/* Lua: hd44780.write( "string" ) */
+static int hd44780_write( lua_State *L )
+{
+   char * str = luaL_checkstring( L, 1 );
+   lcd_write( str );
+   return 0;
+}
+
+/* Lua: hd44780_goto( x, y ) */
+static int hd44780_goto( lua_State *L )
+{
+  lcd_goto( luaL_checkinteger( L, 1 ), luaL_checkinteger( L, 2 ) );
+  return 0;
+}
+
+const LUA_REG_TYPE hd44780_map[] = {
   { LSTRKEY( "init" ), LFUNCVAL( hd44780_init ) },
+  { LSTRKEY( "write" ), LFUNCVAL( hd44780_write ) },
+  { LSTRKEY( "goto" ), LFUNCVAL( hd44780_goto ) },
   { LNILKEY, LNILVAL }
 };
 
-LUALIB_API int luaopen_keyboard ( lua_State *L )
+LUALIB_API int luaopen_hd44780( lua_State *L )
 {
-  LREGISTER( L, "keyboard", keyboard_map );
+  LREGISTER( L, "hd44780", hd44780_map );
+  return 1;
 };
 
