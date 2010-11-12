@@ -1,3 +1,4 @@
+#include "hd44780.h"
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
@@ -16,35 +17,8 @@
 #define IGNORE 1
 #define USE 0
 
-// Commands
-#define CLEAR_DISPLAY   0x01
-#define RETURN_HOME     0x02
-#define DISPLAY_CONTROL 0x08
-#define FUNCTION_SET    0x20
-#define SET_CGRAM_ADDR  0x40
-#define SET_DDRAM_ADDR  0x80
 
-// Flags
-#define DISPLAY_ON  0x04
-#define CURSOR_ON   0x02
-#define BLINKING_ON 0x01
-// 4-bit mode
-#define DL (0 << 4)
-// 2-line display
-#define N  (1 << 3)
-// 5x8 character font
-#define F  (0 << 2)
-
-// Functions
-#define lcd_clear()         send_byte( CLEAR_DISPLAY, 1 )
-#define lcd_return_home()   send_byte( RETURN_HOME, 1 )
- 
-#define lcd_display_on()    display_control_set_on( DISPLAY_ON )
-#define lcd_display_off()   display_control_set_off( DISPLAY_ON )
-#define lcd_cursor_on()     display_control_set_on( CURSOR_ON )
-#define lcd_cursor_off()    display_control_set_off( CURSOR_ON )
-#define lcd_blinking_on()   display_control_set_on( BLINKING_ON )
-#define lcd_blinking_off()  display_control_set_off( BLINKING_ON )
+#define BUSY_FLAG	(1<<7)
 
 typedef struct sPin
 {
@@ -52,7 +26,16 @@ typedef struct sPin
 } tPin;
 
 unsigned char display_config;
-tPin P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7;
+tPin P_RS, P_RW, P_EN, P_D4, P_D5, P_D6, P_D7;
+
+/* Internal usage functions. */
+static void write_nibble (unsigned char c);
+static unsigned char read_nibble (void);
+static void delay_ms (unsigned char t);
+static tPin convertPin( int p );
+static void setPinVal( tPin p, char val );
+static void setPinDir( tPin p, char dir );
+static int getPinVal( tPin p );
 
 /* Converts a pin number got from the Lua stack to the tPin format */
 static tPin convertPin( int p )
@@ -94,137 +77,201 @@ static int getPinVal( tPin p )
   return platform_pio_op( p.port, p.pin, PLATFORM_IO_PIN_GET );
 }
 
-static void send_nibble( unsigned char data )
+void hd44780_init (void)
 {
-  unsigned char out = 0x0f & data;
-  setPinVal( P_D0, out & 0x01 );
-  setPinVal( P_D1, out & 0x02 );
-  setPinVal( P_D2, out & 0x04 );
-  setPinVal( P_D3, out & 0x08 );
-  setPinVal( P_D4, out & 0x10 );
-  setPinVal( P_D5, out & 0x20 );
-  setPinVal( P_D6, out & 0x40 );
-  setPinVal( P_D7, out & 0x80 );
+	hd44780h_dir_nibble( DIR_OUT );
+	hd44780h_rw(0);
+	hd44780h_rs(0);
 
-  platform_timer_delay( 1, 1000 ); /* 1 milisecond */
-  setPinVal( P_EN, 1 );
-  platform_timer_delay( 1, 1000 ); /* 1 milisecond */
-  setPinVal( P_EN, 0 );
-  platform_timer_delay( 1, 1000 ); /* 1 milisecond */
+	/* software reset */
+	delay_ms (15);
+	write_nibble (0x03);
+	delay_ms (4);
+	write_nibble (0x03);
+	delay_ms (1);
+	write_nibble (0x03);
+	delay_ms (1);
+	/* we're in 8-bits mode, set it to 4-bits */
+	write_nibble (0x02);
+	/* busy flag can be checked from now on... */
+
+	hd44780_write_cmd (0x28); /* bits:4, lines: 2, font: 5x8 */
+	hd44780_control (1, 0, 0);
+//	hd44780_write_cmd (0x0E); /* disp:on, cursor:on, blink:off */
+	hd44780_write_cmd (0x01); /* clear */
 }
 
-static void send_byte( unsigned char data, char isCommand )
+/* rs is normaly 0, and rw is normaly 0, so no need to change here. */
+void hd44780_write_data (unsigned char c)
 {
-  setPinVal( P_RS, !(isCommand & 0x01) );
-  send_nibble( data >> 4 );
-  send_nibble( data );
+	while (hd44780_read_status() & BUSY_FLAG)
+		;
+	write_nibble(c >> 4);
+	write_nibble(c);
 }
 
-static void display_control_set_on( unsigned char flags )
+void hd44780_write_cmd (unsigned char c)
 {
-  display_config |= flags;
-  send_byte( DISPLAY_CONTROL | display_config, 1 );
+	while (hd44780_read_status() & BUSY_FLAG)
+		;
+	hd44780h_rs(0);
+	write_nibble(c >> 4);
+	write_nibble(c);
+	hd44780h_rs(1);
 }
 
-static void display_control_set_off( unsigned char flags )
+unsigned char hd44780_read_data (unsigned char c)
 {
-  display_config &= ~flags;
-  send_byte( DISPLAY_CONTROL | display_config, 1 );
+	unsigned char readed;
+	while (hd44780_read_status() & BUSY_FLAG)
+		;
+	hd44780h_rw(1);
+	hd44780h_dir_nibble( DIR_IN );
+	readed = (read_nibble() << 4) | (read_nibble() << 0x0F);
+	hd44780h_rw(0);
+	hd44780h_dir_nibble( DIR_OUT );
+	return readed;
 }
 
-static void lcd_write( char * str )
+unsigned char hd44780_read_status ()
 {
+	unsigned char readed;
+	hd44780h_rw(1);
+	hd44780h_rs(0);
+	hd44780h_dir_nibble( DIR_IN );
+	readed = ((read_nibble() << 4) & 0xF0) | (read_nibble() & 0x0F);
+	hd44780h_rw(0);
+	hd44780h_rs(1);
+	hd44780h_dir_nibble( DIR_OUT );
+	return readed;
+}
+
+static void write_nibble (unsigned char c)
+{
+	hd44780h_en(1);
+	hd44780h_set_nibble(c);
+	hd44780h_en(0);
+}
+
+static unsigned char read_nibble (void)
+{
+	unsigned char c;
+	hd44780h_en(1);
+	c = hd44780h_get_nibble();
+	hd44780h_en(0);
+	return c;
+}
+
+static void delay_ms (unsigned char t)
+{
+  platform_timer_delay( 1, 1000*t );
+}
+
+void hd44780h_en (unsigned char set)
+{
+  setPinVal( P_EN, set );
+}
+
+void hd44780h_rs (unsigned char set)
+{
+  setPinVal( P_RS, set );
+}
+
+void hd44780h_rw (unsigned char set)
+{
+  setPinVal( P_RW, set );
+}
+
+void hd44780h_set_nibble (unsigned char data)
+{
+  setPinVal( P_D4, data & 0x01 );
+  setPinVal( P_D5, data & 0x02 );
+  setPinVal( P_D6, data & 0x04 );
+  setPinVal( P_D7, data & 0x08 );
+}
+
+unsigned char hd44780h_get_nibble (void)
+{
+  unsigned char tmp = 0; 
+  tmp = getPinVal( P_D4 ) & 0x01;
+  tmp |= ( getPinVal( P_D5 ) & 0x01 ) << 1;
+  tmp |= ( getPinVal( P_D6 ) & 0x01 ) << 2;
+  tmp |= ( getPinVal( P_D7 ) & 0x01 ) << 3;
+  return tmp;
+}
+
+void hd44780h_dir_nibble (unsigned char in)
+{
+  setPinDir( P_D4, in );
+  setPinDir( P_D5, in );
+  setPinDir( P_D6, in );
+  setPinDir( P_D7, in );
+}
+
+void hd44780_write( char * str )
+{
+   int i;
+   for ( i=0; str[i] != '\0'; i++ )
+     hd44780_write_data( str[i] );
+}
+
+/* Lua: hd44780.write( "string" ) */
+static int hd44780_write_lua( lua_State *L )
+{
+   char * str = luaL_checkstring( L, 1 );
+   hd44780_write( str ); 
+   return 0;
+}
+
+void hd44780_goto( char x, char y )
+{
+  // go to 0,0
+  hd44780_write_cmd( 0x02 );
+
+  int qtd = x + HD44780_WIDTH * y;
+
+  // Go X chars to the right
   int i;
-
-  for (i = 0; str[i]!= '\0'; i++)
-    send_byte(str[i], 0);
+  for ( i=0; i < qtd; i++ )
+    hd44780_write_cmd( 0x14 );
 }
 
-static void lcd_goto(unsigned char row, unsigned char col)
+/* Lua: hd44780_goto( x, y ) */
+static int hd44780_goto_lua( lua_State *L )
 {
-    unsigned char addr = ((row - 1) * 0x40) + col - 1;
-    send_byte( SET_DDRAM_ADDR | addr, 1 );
+  hd44780_goto( luaL_checkinteger( L, 1 ), luaL_checkinteger( L, 2 ) );
+  return 0;
 }
 
-static void lcd_add_character(unsigned char addr, unsigned char * pattern)
-{
-    int i;
-
-    send_byte( SET_CGRAM_ADDR | addr << 3, 1 );
-    for (i = 0; i < 8; i++)
-      send_byte( pattern[i], 0 );
-}
-
-static void lcd_initialize(void)
-{
-    setPinVal( P_RS, 0 );
-    setPinVal( P_RW, 0 );
-
-    // set 4-bit mode
-    send_nibble( 0x02 );
-
-    // function set
-    send_byte( FUNCTION_SET | DL | N | F, 1 );
-
-    lcd_display_on();
-    lcd_cursor_off();
-    lcd_blinking_off();
-
-    lcd_clear();
-    lcd_return_home();
-}
-
-/* Pins: P_RS, P_RW, P_EN, P_D0, P_D1, P_D2, P_D3, P_D4, P_D5, P_D6, P_D7; */
-static int hd44780_init( lua_State *L )
+/* Pins: P_RS, P_RW, P_EN, P_D4, P_D5, P_D6, P_D7; */
+static int hd44780_init_lua( lua_State *L )
 {
   P_RS = convertPin( luaL_checkinteger( L, 1 ) );
   P_RW = convertPin( luaL_checkinteger( L, 2 ) );
   P_EN = convertPin( luaL_checkinteger( L, 3 ) );
-  P_D0 = convertPin( luaL_checkinteger( L, 4 ) );
-  P_D1 = convertPin( luaL_checkinteger( L, 5 ) );
-  P_D2 = convertPin( luaL_checkinteger( L, 6 ) );
-  P_D3 = convertPin( luaL_checkinteger( L, 7 ) );
-  P_D4 = convertPin( luaL_checkinteger( L, 8 ) );
-  P_D5 = convertPin( luaL_checkinteger( L, 9 ) );
-  P_D6 = convertPin( luaL_checkinteger( L, 10 ) );
-  P_D7 = convertPin( luaL_checkinteger( L, 11 ) );
+  P_D4 = convertPin( luaL_checkinteger( L, 4 ) );
+  P_D5 = convertPin( luaL_checkinteger( L, 5 ) );
+  P_D6 = convertPin( luaL_checkinteger( L, 6 ) );
+  P_D7 = convertPin( luaL_checkinteger( L, 7 ) );
 
   setPinDir( P_RS, DIR_OUT ); 
   setPinDir( P_RW, DIR_OUT ); 
   setPinDir( P_EN, DIR_OUT ); 
-  setPinDir( P_D0, DIR_OUT ); 
-  setPinDir( P_D1, DIR_OUT ); 
-  setPinDir( P_D2, DIR_OUT ); 
-  setPinDir( P_D3, DIR_OUT ); 
   setPinDir( P_D4, DIR_OUT ); 
   setPinDir( P_D5, DIR_OUT ); 
   setPinDir( P_D6, DIR_OUT ); 
   setPinDir( P_D7, DIR_OUT ); 
 
-  lcd_initialize();
-
+  hd44780_init();
   return 0;
 }
 
-/* Lua: hd44780.write( "string" ) */
-static int hd44780_write( lua_State *L )
-{
-   char * str = luaL_checkstring( L, 1 );
-   lcd_write( str );
-   return 0;
-}
 
-/* Lua: hd44780_goto( x, y ) */
-static int hd44780_goto( lua_State *L )
-{
-  lcd_goto( luaL_checkinteger( L, 1 ), luaL_checkinteger( L, 2 ) );
-  return 0;
-}
 
 const LUA_REG_TYPE hd44780_map[] = {
-  { LSTRKEY( "init" ), LFUNCVAL( hd44780_init ) },
-  { LSTRKEY( "write" ), LFUNCVAL( hd44780_write ) },
-  { LSTRKEY( "goto" ), LFUNCVAL( hd44780_goto ) },
+  { LSTRKEY( "init" ), LFUNCVAL( hd44780_init_lua ) },
+  { LSTRKEY( "write" ), LFUNCVAL( hd44780_write_lua ) },
+  { LSTRKEY( "goto" ), LFUNCVAL( hd44780_goto_lua ) },
   { LNILKEY, LNILVAL }
 };
 
