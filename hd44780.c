@@ -127,7 +127,7 @@ unsigned char hd44780_read_data (unsigned char c)
 		;
 	hd44780h_rw(1);
 	hd44780h_dir_nibble( DIR_IN );
-	readed = (read_nibble() << 4) | (read_nibble() << 0x0F);
+	readed = (read_nibble() << 4) | (read_nibble() & 0x0F);
 	hd44780h_rw(0);
 	hd44780h_dir_nibble( DIR_OUT );
 	return readed;
